@@ -9,7 +9,7 @@ SUMMARY_PATH = RESULTS_DIR / "summary.md"
 BASE_URL = os.environ.get("VLLM_BASE_URL", "http://127.0.0.1:8000/v1")
 API_KEY = os.environ.get("VLLM_API_KEY", "EMPTY")
 
-REPEATS = 2
+REPEATS = 10
 
 # Ожидаемые id. Скрипт всё равно берёт модель, которую сейчас отдаёт сервер.
 EXPECTED_MODELS = [
