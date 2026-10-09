@@ -1,12 +1,15 @@
 import json
+import random
 import re
-from collections import defaultdict
+from collections import Counter, defaultdict
 from itertools import combinations
 
 from config import RUNS_PATH, SUMMARY_PATH
 from prompts import PROMPTS
 
 PROMPTS_BY_ID = {prompt["id"]: prompt for prompt in PROMPTS}
+SAMPLE_ANSWERS = 3
+SAMPLE_SEED = 0
 
 
 def load_runs(path) -> list[dict]:
@@ -135,6 +138,22 @@ def fmt_num(value, digits: int) -> str:
     return f"{value:.{digits}f}"
 
 
+def mean(values: list) -> float | None:
+    numbers = [value for value in values if value is not None]
+    if not numbers:
+        return None
+    return sum(numbers) / len(numbers)
+
+
+def group_key(row: dict) -> tuple:
+    return (row["model"], row["prompt_id"], row["mode"])
+
+
+def finish_tally(reasons: list) -> str:
+    counts = Counter(reason or "—" for reason in reasons)
+    return ", ".join(f"{reason}×{count}" for reason, count in counts.most_common())
+
+
 def stability(rows: list[dict]) -> list[dict]:
     groups = defaultdict(list)
     for row in rows:
@@ -161,43 +180,54 @@ def stability(rows: list[dict]) -> list[dict]:
     return report
 
 
+def sample_answers(rows: list[dict]) -> list[dict]:
+    grouped = defaultdict(list)
+    for row in rows:
+        grouped[group_key(row)].append(row)
+    rng = random.Random(SAMPLE_SEED)
+    chosen = []
+    for key in sorted(grouped):
+        group = grouped[key]
+        if len(group) <= SAMPLE_ANSWERS:
+            picked = group
+        else:
+            picked = rng.sample(group, SAMPLE_ANSWERS)
+        chosen.extend(sorted(picked, key=lambda row: row["repeat"]))
+    return chosen
+
+
 def render(rows: list[dict]) -> str:
     scored = [(row, score_row(row)) for row in rows]
+    grouped = defaultdict(list)
+    for row, score in scored:
+        grouped[group_key(row)].append((row, score))
+
     lines = ["# Сводка прогонов", ""]
+    lines.append("Числа в таблице — средние по повторам одной связки модель × промпт × режим.")
+    lines.append("")
     lines.append(
-        "| Модель | Промпт | Режим | Повтор | Ввод | Вывод | Секунды | Ток/с | Символы | finish | Проверка |"
+        "| Модель | Промпт | Режим | N | Ввод | Вывод | Секунды | Ток/с | Символы | Успех | finish |"
     )
     lines.append("| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |")
-    for row, score in scored:
-        usage = row.get("usage") or {}
+    for key in sorted(grouped):
+        pairs = grouped[key]
+        usages = [row.get("usage") or {} for row, _score in pairs]
+        finishes = [row.get("finish_reason") for row, _score in pairs]
+        ok_count = sum(1 for _row, score in pairs if score["ok"])
         lines.append(
-            "| {model} | {prompt_id} | {mode} | {repeat} | {prompt_tokens} | {completion_tokens} | {latency} | {tps} | {chars} | {finish} | {detail} |".format(
-                model=row["model"],
-                prompt_id=row["prompt_id"],
-                mode=row["mode"],
-                repeat=row["repeat"],
-                prompt_tokens=usage.get("prompt_tokens", "—"),
-                completion_tokens=usage.get("completion_tokens", "—"),
-                latency=fmt_num(row.get("latency_s"), 2),
-                tps=fmt_num(row.get("tokens_per_second"), 1),
-                chars=len(row.get("response_text") or ""),
-                finish=row.get("finish_reason") or "—",
-                detail=score["detail"].replace("|", "/"),
+            "| {model} | {prompt_id} | {mode} | {count} | {prompt_tokens} | {completion_tokens} | {latency} | {tps} | {chars} | {ok} | {finish} |".format(
+                model=key[0],
+                prompt_id=key[1],
+                mode=key[2],
+                count=len(pairs),
+                prompt_tokens=fmt_num(mean(usage.get("prompt_tokens") for usage in usages), 1),
+                completion_tokens=fmt_num(mean(usage.get("completion_tokens") for usage in usages), 1),
+                latency=fmt_num(mean(row.get("latency_s") for row, _score in pairs), 2),
+                tps=fmt_num(mean(row.get("tokens_per_second") for row, _score in pairs), 1),
+                chars=fmt_num(mean(len(row.get("response_text") or "") for row, _score in pairs), 0),
+                ok=f"{ok_count}/{len(pairs)}",
+                finish=finish_tally(finishes),
             )
-        )
-
-    lines.extend(["", "## Точность по задачам", ""])
-    by_task = defaultdict(list)
-    for row, score in scored:
-        by_task[(row["model"], row["prompt_id"], row["mode"])].append(score)
-
-    lines.append("| Модель | Промпт | Режим | Успешных прогонов |")
-    lines.append("| --- | --- | --- | --- |")
-    for key in sorted(by_task):
-        scores = by_task[key]
-        ok_count = sum(1 for item in scores if item["ok"])
-        lines.append(
-            f"| {key[0]} | {key[1]} | {key[2]} | {ok_count}/{len(scores)} |"
         )
 
     lines.extend(["", "## Стабильность повторов", ""])
@@ -211,7 +241,12 @@ def render(rows: list[dict]) -> str:
         )
 
     lines.extend(["", "## Ответы", ""])
-    for row in rows:
+    lines.append(
+        f"По каждой связке показаны {SAMPLE_ANSWERS} случайных повтора. "
+        f"Выборка фиксирована, seed={SAMPLE_SEED}."
+    )
+    lines.append("")
+    for row in sample_answers(rows):
         lines.append(
             f"### {row['model']} / {row['prompt_id']} / {row['mode']} / #{row['repeat']}"
         )
