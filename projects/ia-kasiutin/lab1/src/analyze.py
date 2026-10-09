@@ -12,7 +12,7 @@ PROMPTS_BY_ID = {prompt["id"]: prompt for prompt in PROMPTS}
 def load_runs(path) -> list[dict]:
     if not path.exists():
         raise SystemExit(
-            f"Нет файла {path}. Сначала запустите source/run_experiments.py."
+            f"Нет файла {path}. Сначала запустите src/run_experiments.py."
         )
     rows = []
     for line in path.read_text(encoding="utf-8").splitlines():

@@ -13,9 +13,9 @@ REPEATS = 2
 
 # Ожидаемые id. Скрипт всё равно берёт модель, которую сейчас отдаёт сервер.
 EXPECTED_MODELS = [
-    "Qwen/Qwen3-32B-FP8",
-    "microsoft/phi-4",
-    "RedHatAI/Mistral-Small-3.2-24B-Instruct-2506-FP8",
+    "Qwen/Qwen3-4B-Instruct-2507",
+    "microsoft/Phi-4-mini-instruct",
+    "mistralai/Ministral-3-3B-Instruct-2512",
 ]
 
 MODES = {
