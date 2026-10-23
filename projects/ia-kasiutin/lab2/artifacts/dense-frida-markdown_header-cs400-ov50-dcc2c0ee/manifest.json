@@ -1,0 +1,49 @@
+{
+  "run_id": "dense-frida-markdown_header-cs400-ov50-dcc2c0ee",
+  "config_hash": "dcc2c0eeeb52f4dc12c2aed7af1bdfd70212b4aebfb34ccea241e953a19d6474",
+  "created": "2026-10-23T12:10:42+00:00",
+  "config": {
+    "sources": {
+      "dir": "sources",
+      "reparse": false
+    },
+    "splitter": {
+      "type": "markdown_header",
+      "chunk_size": 400,
+      "chunk_overlap": 50,
+      "header_levels": 3,
+      "include_headings": "both"
+    },
+    "embedding": {
+      "vectorization": "dense",
+      "model": "ai-forever/FRIDA",
+      "device": "auto",
+      "batch_size": 16,
+      "max_seq_length": 512,
+      "normalize": true,
+      "query_prefix": "search_query: ",
+      "document_prefix": "search_document: ",
+      "sparse": {
+        "k1": 1.5,
+        "b": 0.75
+      }
+    },
+    "artifacts": {
+      "dir": "artifacts"
+    }
+  },
+  "n_documents": 115,
+  "n_chunks": 181,
+  "chunk_tokens": {
+    "min": 10,
+    "p50": 178.0,
+    "p90": 383.0,
+    "max": 408,
+    "mean": 195.8
+  },
+  "truncated_by_model": 0,
+  "embedding_dim": 1536,
+  "newly_embedded": 179,
+  "seconds": 659.6,
+  "python": "3.12.9"
+}

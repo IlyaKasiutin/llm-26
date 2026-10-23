@@ -1,0 +1,49 @@
+{
+  "run_id": "hybrid-frida-hybrid-cs400-ov50-992cdc63",
+  "config_hash": "992cdc630b22f732100078ebf476d51d2bd4732c6d8510adc1ecac5b24543150",
+  "created": "2026-10-23T12:11:20+00:00",
+  "config": {
+    "sources": {
+      "dir": "sources",
+      "reparse": false
+    },
+    "splitter": {
+      "type": "hybrid",
+      "chunk_size": 400,
+      "chunk_overlap": 50,
+      "header_levels": 3,
+      "include_headings": "both"
+    },
+    "embedding": {
+      "vectorization": "hybrid",
+      "model": "ai-forever/FRIDA",
+      "device": "auto",
+      "batch_size": 16,
+      "max_seq_length": 512,
+      "normalize": true,
+      "query_prefix": "search_query: ",
+      "document_prefix": "search_document: ",
+      "sparse": {
+        "k1": 1.5,
+        "b": 0.75
+      }
+    },
+    "artifacts": {
+      "dir": "artifacts"
+    }
+  },
+  "n_documents": 115,
+  "n_chunks": 155,
+  "chunk_tokens": {
+    "min": 10,
+    "p50": 208.0,
+    "p90": 386.6,
+    "max": 408,
+    "mean": 226.2
+  },
+  "truncated_by_model": 0,
+  "embedding_dim": 1536,
+  "newly_embedded": 21,
+  "seconds": 13.0,
+  "python": "3.12.9"
+}
