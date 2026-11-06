@@ -1,5 +1,3 @@
-"""Промпт RAG-движка."""
-
 from __future__ import annotations
 
 SYSTEM_PROMPT = (

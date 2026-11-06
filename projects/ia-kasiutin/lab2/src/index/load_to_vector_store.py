@@ -1,4 +1,4 @@
-"""Загрузка эмбеддингов из п.3 в FAISS (п.4).
+"""Загрузка эмбеддингов из п.3 в FAISS (п.4) и единый поиск (dense / hybrid RRF).
 
 Запуск из lab2/src:
     python -m index.load_to_vector_store                       # latest run из artifacts/latest.json
@@ -11,20 +11,31 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import os
+import pickle
 import shutil
 import time
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Any
+
+os.environ.setdefault("KMP_DUPLICATE_LIB_OK", "TRUE")
+os.environ.setdefault("OMP_NUM_THREADS", "1")
 
 import faiss
 import numpy as np
+from langchain_core.documents import Document
 
-from .config import Config, load_config
+from config import Config, load_config
+
+from .embedders import PrefixedEmbeddings, bm25_tokenize
 
 MANIFEST = "manifest.json"
 INDEX_FILE = "index.faiss"
 DOCSTORE_FILE = "docstore.jsonl"
 ACTIVE_FILE = "active.json"
+RRF_K = 60
 
 _QUANTIZERS = {
     "fp16": faiss.ScalarQuantizer.QT_fp16,
@@ -39,7 +50,7 @@ def resolve_run_id(config: Config, run_id: str | None) -> str:
         return run_id
     latest = config.artifacts_dir / "latest.json"
     if not latest.is_file():
-        raise SystemExit("Нет artifacts/latest.json: сначала запустите python -m index.build_index")
+        raise FileNotFoundError("Нет artifacts/latest.json: сначала запустите python -m index.build_index")
     return json.loads(latest.read_text(encoding="utf-8"))["run_id"]
 
 
@@ -119,7 +130,7 @@ def build_collection(config: Config, run_id: str, rebuild: bool = False) -> Path
     run_dir = config.artifacts_dir / run_id
     emb_path, chunks_path = run_dir / "embeddings.npy", run_dir / "chunks.jsonl"
     if not emb_path.is_file() or not chunks_path.is_file():
-        raise SystemExit(
+        raise FileNotFoundError(
             f"В {run_dir} нет embeddings.npy/chunks.jsonl: нужен dense или hybrid запуск п.3 "
             "(sparse индексируется BM25, а не FAISS)"
         )
@@ -138,7 +149,7 @@ def build_collection(config: Config, run_id: str, rebuild: bool = False) -> Path
     vectors = np.ascontiguousarray(np.load(emb_path), dtype=np.float32)
     lines = chunks_path.read_text(encoding="utf-8").splitlines()
     if len(lines) != len(vectors):
-        raise SystemExit(f"Число чанков ({len(lines)}) не совпадает с числом векторов ({len(vectors)})")
+        raise ValueError(f"Число чанков ({len(lines)}) не совпадает с числом векторов ({len(vectors)})")
 
     norms = np.linalg.norm(vectors, axis=1)
     if not np.allclose(norms, 1.0, atol=1e-3):
@@ -148,7 +159,7 @@ def build_collection(config: Config, run_id: str, rebuild: bool = False) -> Path
 
     index = make_index(config, vectors)
     if index.ntotal != len(vectors):
-        raise SystemExit(f"ntotal={index.ntotal}, ожидалось {len(vectors)}")
+        raise RuntimeError(f"ntotal={index.ntotal}, ожидалось {len(vectors)}")
 
     set_ef_search(index, config)
     _, found = index.search(vectors, 1)
@@ -218,41 +229,142 @@ def list_collections(config: Config) -> None:
         )
 
 
-# ---------- использование в п.5/п.6 ----------
+# ---------- единый поиск (dense + hybrid BM25/RRF) для п.5 и п.6 ----------
 
-def load_vector_store(config: Config, collection: str | None = None, embeddings=None):
-    """LangChain FAISS поверх готовой коллекции; ef_search берётся из конфига."""
-    from langchain_community.docstore.in_memory import InMemoryDocstore
-    from langchain_community.vectorstores import FAISS
-    from langchain_community.vectorstores.utils import DistanceStrategy
-    from langchain_core.documents import Document
+def load_bm25(path: Path) -> Any:
+    with path.open("rb") as handle:
+        return pickle.load(handle)["bm25"]
 
+
+def rrf_scores(rankings: list[list[int]], k: int = RRF_K) -> dict[int, float]:
+    scores: dict[int, float] = {}
+    for ranking in rankings:
+        for rank, idx in enumerate(ranking, start=1):
+            scores[idx] = scores.get(idx, 0.0) + 1.0 / (k + rank)
+    return scores
+
+
+def rrf_fuse(rankings: list[list[int]], k: int = RRF_K) -> list[int]:
+    scores = rrf_scores(rankings, k)
+    return sorted(scores, key=lambda idx: (-scores[idx], idx))
+
+
+def dense_depth(index_type: str, ef_search: int | None, ntotal: int, min_k: int = 10) -> int:
+    """Глубина поиска FAISS: для HNSW ограничена max(min_k, ef_search), чтобы не завышать efSearch."""
+    if index_type == "flat" or ef_search is None:
+        return ntotal
+    return min(ntotal, max(min_k, ef_search))
+
+
+def dense_rankings(index: faiss.Index, queries: np.ndarray, k: int) -> list[list[int]]:
+    _, ids = index.search(np.ascontiguousarray(queries, dtype=np.float32), k)
+    rankings: list[list[int]] = []
+    for row in ids:
+        ranking: list[int] = []
+        seen: set[int] = set()
+        for idx in row.tolist():
+            if idx < 0 or idx in seen:
+                continue
+            seen.add(idx)
+            ranking.append(idx)
+        rankings.append(ranking)
+    return rankings
+
+
+def bm25_rankings(bm25: Any, questions: list[str], n_chunks: int) -> list[list[int]]:
+    rankings = []
+    for text in questions:
+        scores = np.asarray(bm25.get_scores(bm25_tokenize(text)), dtype=np.float64)
+        if len(scores) != n_chunks:
+            raise ValueError(f"BM25 вернул {len(scores)} оценок на {n_chunks} чанков")
+        rankings.append(np.argsort(-scores, kind="mergesort").tolist())
+    return rankings
+
+
+def fuse_rankings(
+    retrieval: str,
+    dense: list[list[int]],
+    sparse: list[list[int]] | None,
+) -> list[list[int]]:
+    if retrieval == "dense":
+        return dense
+    if sparse is None:
+        raise ValueError("Для hybrid нужен ранжир BM25")
+    return [rrf_fuse([left, right]) for left, right in zip(dense, sparse)]
+
+
+@dataclass
+class VectorStore:
+    """Единый поисковый индекс поверх FAISS и (для hybrid-коллекций) BM25 с RRF."""
+
+    index: faiss.Index
+    docs: list[Document]
+    embeddings: PrefixedEmbeddings
+    bm25: Any | None = None
+    index_type: str = "hnsw"
+    ef_search: int | None = None
+
+    def similarity_search_with_score(self, question: str, k: int = 5) -> list[tuple[Document, float]]:
+        query = self.embeddings.embed_queries([question])
+        if self.bm25 is None:
+            scores, ids = self.index.search(np.ascontiguousarray(query, dtype=np.float32), k)
+            return [
+                (self.docs[idx], float(score))
+                for score, idx in zip(scores[0].tolist(), ids[0].tolist())
+                if 0 <= idx < len(self.docs)
+            ]
+        depth = dense_depth(self.index_type, self.ef_search, len(self.docs), min_k=k)
+        dense = dense_rankings(self.index, query, depth)[0]
+        sparse = bm25_rankings(self.bm25, [question], len(self.docs))[0]
+        scores = rrf_scores([dense, sparse])
+        return [(self.docs[idx], scores[idx]) for idx in rrf_fuse([dense, sparse])[:k]]
+
+
+def load_vector_store(
+    config: Config,
+    collection: str | None = None,
+    embeddings: PrefixedEmbeddings | None = None,
+) -> VectorStore:
+    """Загружает FAISS-коллекцию (и BM25 при hybrid-прогоне); ef_search берётся из конфига."""
     store_dir = config.faiss_dir
     collection = collection or read_active(store_dir)
     if not collection or not (store_dir / collection / INDEX_FILE).is_file():
-        raise SystemExit("Нет активной коллекции: запустите python -m index.load_to_vector_store")
+        raise FileNotFoundError("Нет активной коллекции: запустите python -m index.load_to_vector_store")
     directory = store_dir / collection
 
     index = faiss.read_index(str(directory / INDEX_FILE))
     set_ef_search(index, config)
-    docs, ids = {}, {}
+
+    by_id: dict[int, Document] = {}
     with (directory / DOCSTORE_FILE).open(encoding="utf-8") as handle:
         for line in handle:
             record = json.loads(line)
-            key = str(record["faiss_id"])
-            ids[record["faiss_id"]] = key
-            docs[key] = Document(page_content=record["text"], metadata=record["metadata"])
-    if embeddings is None:
-        from .embedders import PrefixedEmbeddings
+            by_id[int(record["faiss_id"])] = Document(
+                page_content=record["text"], metadata=record["metadata"]
+            )
+    docs = [by_id[i] for i in range(len(by_id))]
 
+    bm25 = None
+    index_type = config.index.type
+    manifest_path = directory / MANIFEST
+    if manifest_path.is_file():
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        index_type = manifest.get("index", {}).get("type", index_type)
+        run_id = manifest.get("run_id")
+        if run_id:
+            bm25_path = config.artifacts_dir / run_id / "bm25.pkl"
+            if bm25_path.is_file():
+                bm25 = load_bm25(bm25_path)
+
+    if embeddings is None:
         embeddings = PrefixedEmbeddings(config.embedding)
-    return FAISS(
-        embedding_function=embeddings,
+    return VectorStore(
         index=index,
-        docstore=InMemoryDocstore(docs),
-        index_to_docstore_id=ids,
-        normalize_L2=False,
-        distance_strategy=DistanceStrategy.MAX_INNER_PRODUCT,
+        docs=docs,
+        embeddings=embeddings,
+        bm25=bm25,
+        index_type=index_type,
+        ef_search=config.index.hnsw.ef_search if index_type == "hnsw" else None,
     )
 
 
@@ -268,15 +380,18 @@ def main() -> None:
     parser.add_argument("--list", action="store_true", help="показать коллекции")
     args = parser.parse_args()
 
-    config = load_config(args.config, args.overrides)
-    if args.list:
-        list_collections(config)
-    elif args.reset:
-        reset(config, args.run_id, args.all)
-    else:
-        if args.drop_and_reindex:
-            shutil.rmtree(config.faiss_dir, ignore_errors=True)
-        build_collection(config, resolve_run_id(config, args.run_id), rebuild=args.rebuild)
+    try:
+        config = load_config(args.config, args.overrides)
+        if args.list:
+            list_collections(config)
+        elif args.reset:
+            reset(config, args.run_id, args.all)
+        else:
+            if args.drop_and_reindex:
+                shutil.rmtree(config.faiss_dir, ignore_errors=True)
+            build_collection(config, resolve_run_id(config, args.run_id), rebuild=args.rebuild)
+    except (FileNotFoundError, ValueError, RuntimeError) as error:
+        raise SystemExit(str(error)) from error
 
 
 if __name__ == "__main__":

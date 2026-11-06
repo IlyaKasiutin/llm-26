@@ -3,7 +3,7 @@ sources:
   reparse: false
 
 splitter:
-  type: markdown_header      # markdown_header | recursive | hybrid
+  type: markdown_header      # markdown_header | recursive
   chunk_size: 400
   chunk_overlap: 50
   header_levels: 3

@@ -10,23 +10,28 @@ from docling.document_converter import DocumentConverter, PdfFormatOption
 from docling_core.types.doc.document import DoclingDocument
 
 LAB2_ROOT = Path(__file__).resolve().parents[2]
-PDF_PATH = LAB2_ROOT / "sources" / "diploma.pdf"
+PDF_PATH = LAB2_ROOT / "docs" / "diploma.pdf"
 OUTPUT_PATH = Path(__file__).resolve().parent / "output" / "diploma.md"
 
-# Дробь MTTF на странице 41 в текстовом слое PDF приходит удвоенными глифами.
-_BROKEN_MTTF = re.compile(
-    r"MTTF\s*=\s*1?\s*𝑛+\s*[×x]\s*∑\s*\(\s*𝑡+\s*сбой\s*,\s*𝑖+\s*[−–-]\s*𝑡+\s*нач\.работы\s*,\s*𝑖+\s*\)\s*𝑛+\s*𝑖+\s*=\s*1",
-    re.IGNORECASE,
-)
 _LATEX_MTTF = (
     "$$\n"
     r"\mathrm{MTTF} = \frac{1}{n} \sum_{i=1}^{n}"
     r" (t_{\text{сбой},i} - t_{\text{нач.работы},i})"
     "\n$$"
 )
-# Та же дробь после formula enrichment: кириллица в индексах распознана латиницей.
-_DOCLING_MTTF = re.compile(
-    r"\$\$\s*M\s*T\s*T\s*F\s*=\s*\\frac\s*\{\s*1\s*\}\s*\{\s*n\s*\}[^$]*\$\$"
+# Правила восстановления формул, где текстовый слой PDF / OCR искажает глифы.
+FORMULA_FIXES: tuple[tuple[re.Pattern[str], str], ...] = (
+    (
+        re.compile(
+            r"MTTF\s*=\s*1?\s*𝑛+\s*[×x]\s*∑\s*\(\s*𝑡+\s*сбой\s*,\s*𝑖+\s*[−–-]\s*𝑡+\s*нач\.работы\s*,\s*𝑖+\s*\)\s*𝑛+\s*𝑖+\s*=\s*1",
+            re.IGNORECASE,
+        ),
+        _LATEX_MTTF,
+    ),
+    (
+        re.compile(r"\$\$\s*M\s*T\s*T\s*F\s*=\s*\\frac\s*\{\s*1\s*\}\s*\{\s*n\s*\}[^$]*\$\$"),
+        _LATEX_MTTF,
+    ),
 )
 
 
@@ -123,10 +128,10 @@ def page_body(document: DoclingDocument, page: int) -> str:
     return body.strip()
 
 
-def replace_broken_mttf(markdown: str) -> str:
-    # Подстановка функцией, чтобы обратные слэши LaTeX не читались как escape regex.
-    markdown = _BROKEN_MTTF.sub(lambda _match: _LATEX_MTTF, markdown)
-    return _DOCLING_MTTF.sub(lambda _match: _LATEX_MTTF, markdown)
+def normalize_page_markdown(markdown: str) -> str:
+    for pattern, replacement in FORMULA_FIXES:
+        markdown = pattern.sub(lambda _match, r=replacement: r, markdown)
+    return markdown
 
 
 def iter_pages(document: DoclingDocument) -> Iterator[tuple[int, str, str]]:
@@ -134,7 +139,7 @@ def iter_pages(document: DoclingDocument) -> Iterator[tuple[int, str, str]]:
     total = page_count(document)
     sections = sections_by_page(document, total)
     for page in range(1, total + 1):
-        yield page, sections[page], replace_broken_mttf(page_body(document, page))
+        yield page, sections[page], normalize_page_markdown(page_body(document, page))
 
 
 def render(document: DoclingDocument, pdf_path: Path) -> str:

@@ -11,7 +11,7 @@ from pathlib import Path
 import numpy as np
 from langchain_core.embeddings import Embeddings
 
-from .config import Config, EmbeddingConfig
+from config import Config, EmbeddingConfig
 
 
 def resolve_device(requested: str) -> str:

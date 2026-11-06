@@ -1,0 +1,76 @@
+{
+  "run_id": "dense-frida-recursive-cs400-ov50-85f6432f",
+  "config_hash": "85f6432ff2b4109284f41a14cca197f3a5a0e319924c6e5447c055e8a0bfc2ec",
+  "created": "2026-11-06T11:36:59+00:00",
+  "config": {
+    "sources": {
+      "dir": "docs",
+      "reparse": false
+    },
+    "splitter": {
+      "type": "recursive",
+      "chunk_size": 400,
+      "chunk_overlap": 50,
+      "header_levels": 3,
+      "include_headings": "both"
+    },
+    "embedding": {
+      "vectorization": "dense",
+      "model": "ai-forever/FRIDA",
+      "device": "auto",
+      "batch_size": 16,
+      "max_seq_length": 512,
+      "normalize": true,
+      "query_prefix": "search_query: ",
+      "document_prefix": "search_document: ",
+      "sparse": {
+        "k1": 1.5,
+        "b": 0.75
+      }
+    },
+    "index": {
+      "type": "hnsw",
+      "metric": "cosine",
+      "hnsw": {
+        "M": 32,
+        "ef_construction": 200,
+        "ef_search": 64
+      },
+      "quantization": "none",
+      "dir": "faiss"
+    },
+    "rag": {
+      "collection": null,
+      "top_n": 5,
+      "min_score": null,
+      "max_context_tokens": 3000,
+      "snippet_chars": 240
+    },
+    "llm": {
+      "base_url": "http://127.0.0.1:8000/v1",
+      "model": "auto",
+      "temperature": 0.1,
+      "top_p": 0.9,
+      "max_tokens": 700,
+      "repetition_penalty": 1.15,
+      "timeout_s": 120.0
+    },
+    "artifacts": {
+      "dir": "artifacts"
+    }
+  },
+  "n_documents": 115,
+  "n_chunks": 152,
+  "chunk_tokens": {
+    "min": 17,
+    "p50": 245.5,
+    "p90": 381.9,
+    "max": 399,
+    "mean": 230.8
+  },
+  "truncated_by_model": 0,
+  "embedding_dim": 1536,
+  "newly_embedded": 0,
+  "seconds": 10.6,
+  "python": "3.12.9"
+}

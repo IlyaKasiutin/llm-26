@@ -6,7 +6,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel, Field
 
-from index.config import load_config
+from config import load_config
 
 from .engine import RagEngine, build_engine
 from .llm import LlmUnavailable, list_model_ids, resolve_base_url

@@ -1,12 +1,10 @@
-"""Клиент к vLLM-серверу из лабы 1 (OpenAI-совместимый REST)."""
-
 from __future__ import annotations
 
 import os
 
 from langchain_openai import ChatOpenAI
 
-from index.config import LlmConfig
+from config import LlmConfig
 
 DEFAULT_BASE_URL = "http://127.0.0.1:8000/v1"
 

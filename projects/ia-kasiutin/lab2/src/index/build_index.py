@@ -20,9 +20,9 @@ import numpy as np
 
 from preprocessing.loaders import load_documents
 
-from .config import Config, config_hash, load_config
+from config import Config, config_hash, load_config
 from .embedders import EmbeddingCache, PrefixedEmbeddings, build_bm25
-from .splitters import split_documents, token_counter
+from .splitters import embedder_token_counter, split_documents
 
 MANIFEST = "manifest.json"
 
@@ -87,13 +87,13 @@ def build(config: Config, rebuild: bool = False, dry_run: bool = False) -> Path 
     print(f"Documents: {len(documents)}")
     chunks = split_documents(documents, config)
     if not chunks:
-        raise SystemExit("Не получено ни одного чанка")
+        raise ValueError("Не получено ни одного чанка")
 
     n_tokens = [c.metadata["n_tokens"] for c in chunks]
     stats = token_stats(n_tokens)
     emb = config.embedding
-    count = token_counter(emb.model)
-    embedded_tokens = [count(emb.document_prefix + c.page_content) for c in chunks]
+    count_embed = embedder_token_counter(config)
+    embedded_tokens = [c.metadata.get("embed_tokens") or count_embed(c.page_content) for c in chunks]
     truncated = sum(t > emb.max_seq_length for t in embedded_tokens)
     print(f"Чанков: {len(chunks)}; токены: {stats}; будут обрезаны моделью: {truncated}")
     if dry_run:

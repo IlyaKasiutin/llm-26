@@ -22,6 +22,10 @@ from evaluate import (
     rrf_fuse,
     top_overlap,
 )
+from langchain_core.documents import Document
+
+from config import Config
+from index.splitters import split_documents
 
 ROOT = _EVAL.parent
 
@@ -103,6 +107,102 @@ class GoldFileTests(unittest.TestCase):
                 self.skipTest(f"нет {path}")
             chunk_sets[run_id] = load_chunk_texts(path)
         self.assertEqual(gold_errors(questions, diploma, chunk_sets), [])
+
+
+class SplitterBudgetTests(unittest.TestCase):
+    @staticmethod
+    def _word_len(text: str) -> int:
+        return len(text.split())
+
+    def _embed_len(self, config: Config):
+        prefix = config.embedding.document_prefix
+        return lambda text: len((prefix + text).split()) + 2  # +2 спецтокена (BOS/EOS)
+
+    def test_nested_headings_prepended_without_duplicate_markdown_header(self) -> None:
+        config = Config.model_validate(
+            {"splitter": {"type": "markdown_header", "chunk_size": 50, "chunk_overlap": 5}}
+        )
+        page = Document(
+            page_content="# Глава 1\n## Раздел 1.1\n### Подраздел 1.1.1\nПервый абзац текста.",
+            metadata={"source": "doc.pdf", "page": 1},
+        )
+        chunks = split_documents(
+            [page], config, length_fn=self._word_len, embed_length_fn=self._embed_len(config)
+        )
+        self.assertEqual(len(chunks), 1)
+        self.assertEqual(
+            chunks[0].page_content,
+            "Глава 1 > Раздел 1.1 > Подраздел 1.1.1\n\nПервый абзац текста.",
+        )
+        self.assertNotIn("###", chunks[0].page_content)
+
+    def test_header_only_page_is_preserved(self) -> None:
+        config = Config.model_validate(
+            {"splitter": {"type": "markdown_header", "chunk_size": 50, "chunk_overlap": 5}}
+        )
+        page = Document(
+            page_content="## Титульный лист\n### Университет ИТМО",
+            metadata={"source": "doc.pdf", "page": 1, "section": "Титульный лист"},
+        )
+        chunks = split_documents(
+            [page], config, length_fn=self._word_len, embed_length_fn=self._embed_len(config)
+        )
+        self.assertEqual(len(chunks), 1)
+        self.assertIn("Университет ИТМО", chunks[0].page_content)
+
+    def test_chunks_strictly_fit_chunk_size_and_embedder_window(self) -> None:
+        config = Config.model_validate(
+            {
+                "splitter": {
+                    "type": "markdown_header",
+                    "chunk_size": 20,
+                    "chunk_overlap": 3,
+                    "include_headings": "both",
+                },
+                "embedding": {"max_seq_length": 22, "document_prefix": "search_document: "},
+            }
+        )
+        body = " ".join(f"слово{i}" for i in range(60))
+        page = Document(
+            page_content=f"# Глава первая\n## Раздел второй\n### Подраздел третий\n{body}",
+            metadata={"source": "doc.pdf", "page": 2},
+        )
+        chunks = split_documents(
+            [page], config, length_fn=self._word_len, embed_length_fn=self._embed_len(config)
+        )
+        self.assertGreater(len(chunks), 3)
+        for chunk in chunks:
+            self.assertTrue(
+                chunk.page_content.startswith("Глава первая > Раздел второй > Подраздел третий\n\n")
+            )
+            self.assertLessEqual(chunk.metadata["n_tokens"], config.splitter.chunk_size)
+            self.assertLessEqual(chunk.metadata["embed_tokens"], config.embedding.max_seq_length)
+
+    def test_h1_carries_across_pages_to_h2_subsections(self) -> None:
+        config = Config.model_validate(
+            {"splitter": {"type": "markdown_header", "chunk_size": 50, "chunk_overlap": 5}}
+        )
+        pages = [
+            Document(
+                page_content="# ГЛАВА 2 Сравнительный анализ\nВводный текст главы.\n## 2.1 Показатели\nТекст 2.1.",
+                metadata={"source": "doc.pdf", "page": 32},
+            ),
+            Document(
+                page_content="Продолжение 2.1.\n## 2.2 Модели\nТекст 2.2.",
+                metadata={"source": "doc.pdf", "page": 33},
+            ),
+        ]
+        chunks = split_documents(
+            pages, config, length_fn=self._word_len, embed_length_fn=self._embed_len(config)
+        )
+        self.assertEqual(len(chunks), 4)
+        self.assertEqual(chunks[2].metadata["h1"], "ГЛАВА 2 Сравнительный анализ")
+        self.assertEqual(chunks[2].metadata["h2"], "2.1 Показатели")
+        self.assertTrue(
+            chunks[3].page_content.startswith("ГЛАВА 2 Сравнительный анализ > 2.2 Модели\n\n")
+        )
+        self.assertEqual(chunks[3].metadata["h1"], "ГЛАВА 2 Сравнительный анализ")
+        self.assertEqual(chunks[3].metadata["h2"], "2.2 Модели")
 
 
 if __name__ == "__main__":

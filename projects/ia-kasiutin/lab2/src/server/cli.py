@@ -5,7 +5,7 @@ from __future__ import annotations
 import argparse
 import json
 
-from index.config import load_config
+from config import load_config
 
 from .engine import build_engine
 from .llm import LlmUnavailable

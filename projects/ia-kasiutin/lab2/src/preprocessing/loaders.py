@@ -1,5 +1,3 @@
-"""LangChain-загрузчики документов поверх Docling-парсера из parse_pdf.py."""
-
 from __future__ import annotations
 
 import argparse
@@ -11,13 +9,10 @@ from pathlib import Path
 from langchain_core.document_loaders import BaseLoader
 from langchain_core.documents import Document
 
-try:
-    from . import parse_pdf
-except ImportError:  # запуск как скрипта: python loaders.py
-    import parse_pdf
+from . import parse_pdf
 
 OUTPUT_DIR = parse_pdf.OUTPUT_PATH.parent
-SOURCES_DIR = parse_pdf.LAB2_ROOT / "sources"
+SOURCES_DIR = parse_pdf.LAB2_ROOT / "docs"
 CACHE_VERSION = 1
 
 

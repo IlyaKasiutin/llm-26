@@ -1,10 +1,10 @@
 {
   "run_id": "dense-frida-markdown_header-cs400-ov50-dcc2c0ee",
   "config_hash": "dcc2c0eeeb52f4dc12c2aed7af1bdfd70212b4aebfb34ccea241e953a19d6474",
-  "created": "2026-10-23T12:10:42+00:00",
+  "created": "2026-11-06T11:34:44+00:00",
   "config": {
     "sources": {
-      "dir": "sources",
+      "dir": "docs",
       "reparse": false
     },
     "splitter": {
@@ -28,22 +28,49 @@
         "b": 0.75
       }
     },
+    "index": {
+      "type": "hnsw",
+      "metric": "cosine",
+      "hnsw": {
+        "M": 32,
+        "ef_construction": 200,
+        "ef_search": 64
+      },
+      "quantization": "none",
+      "dir": "faiss"
+    },
+    "rag": {
+      "collection": null,
+      "top_n": 5,
+      "min_score": null,
+      "max_context_tokens": 3000,
+      "snippet_chars": 240
+    },
+    "llm": {
+      "base_url": "http://127.0.0.1:8000/v1",
+      "model": "auto",
+      "temperature": 0.1,
+      "top_p": 0.9,
+      "max_tokens": 700,
+      "repetition_penalty": 1.15,
+      "timeout_s": 120.0
+    },
     "artifacts": {
       "dir": "artifacts"
     }
   },
   "n_documents": 115,
-  "n_chunks": 181,
+  "n_chunks": 171,
   "chunk_tokens": {
-    "min": 10,
-    "p50": 178.0,
-    "p90": 383.0,
-    "max": 408,
-    "mean": 195.8
+    "min": 23,
+    "p50": 194.0,
+    "p90": 382.0,
+    "max": 399,
+    "mean": 208.9
   },
   "truncated_by_model": 0,
   "embedding_dim": 1536,
-  "newly_embedded": 179,
-  "seconds": 659.6,
+  "newly_embedded": 129,
+  "seconds": 164.2,
   "python": "3.12.9"
 }

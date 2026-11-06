@@ -7,9 +7,9 @@ import time
 from collections.abc import Callable
 from typing import Any
 
-from index.config import Config
+from config import Config
 
-from .llm import LlmUnavailable, make_llm
+from .llm import LlmUnavailable, make_llm, resolve_model
 from .prompts import NO_ANSWER, build_messages
 
 _MARKER = re.compile(r"\[(\d+(?:\s*[,;]\s*\d+)*)\]")
@@ -45,18 +45,15 @@ class RagEngine:
         vector_store,
         config: Config,
         llm=None,
-        llm_factory: Callable[[], Any] | None = None,
         model_id: str | None = None,
         count_tokens: Callable[[str], int] | None = None,
     ) -> None:
         self.store = vector_store
         self.config = config
         self.llm = llm
-        self.llm_factory = llm_factory
         self.model_id = model_id
         self.count_tokens = count_tokens or (lambda text: len(text.split()))
 
-    # 1. поиск
     def retrieve(self, question: str, top_n: int | None = None) -> list[dict]:
         rag = self.config.rag
         hits = self.store.similarity_search_with_score(question, k=top_n or rag.top_n)
@@ -68,7 +65,7 @@ class RagEngine:
                 continue
             tokens = self.count_tokens(doc.page_content)
             if blocks and used + tokens > rag.max_context_tokens:
-                break  # бюджет контекста исчерпан; первый чанк берём всегда
+                break
             used += tokens
             blocks.append(
                 {
@@ -83,16 +80,14 @@ class RagEngine:
             )
         return blocks
 
-    # 2-3. промпт без вызова LLM (для --show-prompt)
     def prepare(self, question: str, top_n: int | None = None) -> tuple[list[dict], list[dict]]:
         blocks = self.retrieve(question, top_n)
         return build_messages(question, blocks), blocks
 
     def _ensure_llm(self):
         if self.llm is None:
-            if self.llm_factory is None:
-                raise LlmUnavailable("LLM не настроен")
-            self.llm = self.llm_factory()
+            self.model_id = self.model_id or resolve_model(self.config.llm)
+            self.llm = make_llm(self.config.llm, self.model_id)
         return self.llm
 
     def _citations(self, answer: str, blocks: list[dict]) -> list[dict]:
@@ -148,7 +143,7 @@ class RagEngine:
 
 
 def build_engine(config: Config, with_llm: bool = True) -> RagEngine:
-    """Загружает FAISS и эмбеддер (локально); LLM подключается лениво."""
+    """Загружает FAISS/BM25 и эмбеддер (локально); LLM подключается лениво."""
     from index.load_to_vector_store import load_vector_store
     from index.splitters import token_counter
 
@@ -157,14 +152,6 @@ def build_engine(config: Config, with_llm: bool = True) -> RagEngine:
         store, config, count_tokens=token_counter(config.embedding.model)
     )
     if with_llm:
-        from .llm import resolve_model
-
-        def factory():
-            model_id = resolve_model(config.llm)
-            engine.model_id = model_id
-            return make_llm(config.llm, model_id)
-
-        engine.llm_factory = factory
         try:
             engine._ensure_llm()
         except LlmUnavailable as error:
