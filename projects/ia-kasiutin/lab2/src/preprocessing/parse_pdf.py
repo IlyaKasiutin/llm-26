@@ -72,60 +72,12 @@ def convert(pdf_path: Path) -> DoclingDocument:
     return converter.convert(pdf_path).document
 
 
-def is_section_header(item: object) -> bool:
-    label = getattr(item, "label", None)
-    if label is None:
-        return False
-    return str(getattr(label, "value", label)) == "section_header"
-
-
-def item_page(item: object) -> int | None:
-    provenance = getattr(item, "prov", None) or []
-    if not provenance:
-        return None
-    page_no = getattr(provenance[0], "page_no", None)
-    if page_no is None:
-        return None
-    return int(page_no)
-
-
-def sections_by_page(document: DoclingDocument, page_count: int) -> dict[int, str]:
-    """Последний заголовок раздела, который действует на странице."""
-    current = ""
-    seen: dict[int, str] = {}
-    for item, _level in document.iterate_items():
-        if is_section_header(item):
-            text = getattr(item, "text", "") or ""
-            cleaned = " ".join(text.split())
-            if cleaned:
-                current = cleaned
-        page_no = item_page(item)
-        if page_no is not None:
-            seen[page_no] = current
-
-    resolved: dict[int, str] = {}
-    carried = ""
-    for page in range(1, page_count + 1):
-        if page in seen:
-            carried = seen[page]
-        resolved[page] = carried
-    return resolved
-
-
 def page_count(document: DoclingDocument) -> int:
-    if not document.pages:
-        return 0
-    return max(int(page) for page in document.pages)
+    return max((int(page) for page in document.pages), default=0)
 
 
-def page_marker(source_name: str, page: int, section: str) -> str:
-    clean = " ".join(section.split()).replace("--", "—")
-    return f'<!-- source: {source_name} page: {page} section: "{clean}" -->'
-
-
-def page_body(document: DoclingDocument, page: int) -> str:
-    body = document.export_to_markdown(page_no=page, image_placeholder="")
-    return body.strip()
+def page_marker(source_name: str, page: int) -> str:
+    return f"<!-- source: {source_name} page: {page} -->"
 
 
 def normalize_page_markdown(markdown: str) -> str:
@@ -134,18 +86,17 @@ def normalize_page_markdown(markdown: str) -> str:
     return markdown
 
 
-def iter_pages(document: DoclingDocument) -> Iterator[tuple[int, str, str]]:
-    """Возвращает (страница, раздел, markdown страницы); тело может быть пустым."""
-    total = page_count(document)
-    sections = sections_by_page(document, total)
-    for page in range(1, total + 1):
-        yield page, sections[page], normalize_page_markdown(page_body(document, page))
+def iter_pages(document: DoclingDocument) -> Iterator[tuple[int, str]]:
+    """Возвращает (страница, markdown страницы); тело может быть пустым."""
+    for page in range(1, page_count(document) + 1):
+        body = document.export_to_markdown(page_no=page, image_placeholder="").strip()
+        yield page, normalize_page_markdown(body)
 
 
 def render(document: DoclingDocument, pdf_path: Path) -> str:
     parts = [front_matter(pdf_path).rstrip()]
-    for page, section, body in iter_pages(document):
-        parts.append(page_marker(pdf_path.name, page, section))
+    for page, body in iter_pages(document):
+        parts.append(page_marker(pdf_path.name, page))
         if body:
             parts.append(body)
     return "\n\n".join(parts) + "\n"

@@ -3,7 +3,7 @@
 Запуск из lab2/src:
     python -m index.load_to_vector_store                       # latest run из artifacts/latest.json
     python -m index.load_to_vector_store --run-id <run_id> --set index.hnsw.M=16
-    python -m index.load_to_vector_store --rebuild | --drop-and-reindex | --reset [--all] | --list
+    python -m index.load_to_vector_store --rebuild | --reset [--all] | --list
 """
 
 from __future__ import annotations
@@ -29,7 +29,7 @@ from langchain_core.documents import Document
 
 from config import Config, load_config
 
-from .embedders import PrefixedEmbeddings, bm25_tokenize
+from .embedders import ChunkEmbeddings, bm25_tokenize
 
 MANIFEST = "manifest.json"
 INDEX_FILE = "index.faiss"
@@ -74,7 +74,7 @@ def collection_hash(config: Config, embeddings_sha: str) -> str:
     i = config.index
     payload = {
         "type": i.type,
-        "metric": i.metric,
+        "metric": "cosine",  # ключ остаётся, чтобы уже собранные коллекции не пересобирались
         "M": i.hnsw.M,
         "ef_construction": i.hnsw.ef_construction,
         "quantization": i.quantization,
@@ -126,13 +126,12 @@ def is_complete(directory: Path, digest: str) -> bool:
     return json.loads(manifest.read_text(encoding="utf-8")).get("collection_hash") == digest
 
 
-def build_collection(config: Config, run_id: str, rebuild: bool = False) -> Path:
+def build_collection(config: Config, run_id: str, rebuild: bool = False, activate: bool = True) -> Path:
     run_dir = config.artifacts_dir / run_id
     emb_path, chunks_path = run_dir / "embeddings.npy", run_dir / "chunks.jsonl"
     if not emb_path.is_file() or not chunks_path.is_file():
         raise FileNotFoundError(
-            f"В {run_dir} нет embeddings.npy/chunks.jsonl: нужен dense или hybrid запуск п.3 "
-            "(sparse индексируется BM25, а не FAISS)"
+            f"В {run_dir} нет embeddings.npy/chunks.jsonl: нужен dense или hybrid запуск п.3"
         )
 
     store_dir = config.faiss_dir
@@ -142,7 +141,8 @@ def build_collection(config: Config, run_id: str, rebuild: bool = False) -> Path
 
     if not rebuild and is_complete(target, digest):
         print(f"Коллекция уже построена: {target} (--rebuild для пересборки)")
-        write_active(store_dir, name)
+        if activate:
+            write_active(store_dir, name)
         return target
 
     started = time.time()
@@ -151,19 +151,11 @@ def build_collection(config: Config, run_id: str, rebuild: bool = False) -> Path
     if len(lines) != len(vectors):
         raise ValueError(f"Число чанков ({len(lines)}) не совпадает с числом векторов ({len(vectors)})")
 
-    norms = np.linalg.norm(vectors, axis=1)
-    if not np.allclose(norms, 1.0, atol=1e-3):
-        print("Векторы не нормализованы: нормализую для cosine")
-        vectors = vectors / np.maximum(norms, 1e-12)[:, None]
-        vectors = np.ascontiguousarray(vectors, dtype=np.float32)
-
     index = make_index(config, vectors)
     if index.ntotal != len(vectors):
         raise RuntimeError(f"ntotal={index.ntotal}, ожидалось {len(vectors)}")
 
     set_ef_search(index, config)
-    _, found = index.search(vectors, 1)
-    self_recall = float(np.mean(found[:, 0] == np.arange(len(vectors))))
     build_seconds = round(time.time() - started, 2)
 
     tmp = store_dir / f".tmp-{name}"
@@ -182,19 +174,18 @@ def build_collection(config: Config, run_id: str, rebuild: bool = False) -> Path
         "index": config.to_dict()["index"],
         "ntotal": int(index.ntotal),
         "dim": int(vectors.shape[1]),
-        "self_recall_at1": self_recall,
         "build_seconds": build_seconds,
         "index_bytes": (tmp / INDEX_FILE).stat().st_size,
-        "faiss_version": faiss.__version__,
     }
     (tmp / MANIFEST).write_text(json.dumps(manifest, indent=2, ensure_ascii=False), encoding="utf-8")
 
     shutil.rmtree(target, ignore_errors=True)
     tmp.rename(target)
-    write_active(store_dir, name)
+    if activate:
+        write_active(store_dir, name)
     print(
         f"Коллекция {name}: ntotal={manifest['ntotal']}, dim={manifest['dim']}, "
-        f"self-recall@1={self_recall:.3f}, {manifest['index_bytes'] / 1024:.0f} КБ, {build_seconds} с"
+        f"{manifest['index_bytes'] / 1024:.0f} КБ, {build_seconds} с"
     )
     return target
 
@@ -224,8 +215,7 @@ def list_collections(config: Config) -> None:
         m = json.loads(path.read_text(encoding="utf-8"))
         mark = "*" if m["collection"] == active else " "
         print(
-            f"{mark} {m['collection']}  ntotal={m['ntotal']}  "
-            f"self-recall@1={m['self_recall_at1']:.3f}  {m['index_bytes'] / 1024:.0f} КБ"
+            f"{mark} {m['collection']}  ntotal={m['ntotal']}  {m['index_bytes'] / 1024:.0f} КБ"
         )
 
 
@@ -277,7 +267,9 @@ def bm25_rankings(bm25: Any, questions: list[str], n_chunks: int) -> list[list[i
         scores = np.asarray(bm25.get_scores(bm25_tokenize(text)), dtype=np.float64)
         if len(scores) != n_chunks:
             raise ValueError(f"BM25 вернул {len(scores)} оценок на {n_chunks} чанков")
-        rankings.append(np.argsort(-scores, kind="mergesort").tolist())
+        positive = np.flatnonzero(scores > 0)
+        order = positive[np.argsort(-scores[positive], kind="mergesort")]
+        rankings.append(order.tolist())
     return rankings
 
 
@@ -285,12 +277,31 @@ def fuse_rankings(
     retrieval: str,
     dense: list[list[int]],
     sparse: list[list[int]] | None,
+    rrf_k: int = RRF_K,
 ) -> list[list[int]]:
     if retrieval == "dense":
         return dense
     if sparse is None:
         raise ValueError("Для hybrid нужен ранжир BM25")
-    return [rrf_fuse([left, right]) for left, right in zip(dense, sparse)]
+    return [rrf_fuse([left, right], rrf_k) for left, right in zip(dense, sparse)]
+
+
+def rank_indices(
+    index: faiss.Index,
+    queries: np.ndarray,
+    questions: list[str],
+    bm25: Any | None,
+    depth: int,
+    rrf_k: int = RRF_K,
+) -> tuple[list[list[int]], list[dict[int, float]]]:
+    """Порядок чанков и очки. Для dense очки пустые: их отдаёт inner product в VectorStore."""
+    dense = dense_rankings(index, queries, depth)
+    if bm25 is None:
+        return dense, [{} for _ in dense]
+    sparse = bm25_rankings(bm25, questions, index.ntotal)
+    orders = fuse_rankings("hybrid", dense, sparse, rrf_k)
+    score_maps = [rrf_scores([left, right], rrf_k) for left, right in zip(dense, sparse)]
+    return orders, score_maps
 
 
 @dataclass
@@ -299,10 +310,11 @@ class VectorStore:
 
     index: faiss.Index
     docs: list[Document]
-    embeddings: PrefixedEmbeddings
+    embeddings: ChunkEmbeddings
     bm25: Any | None = None
     index_type: str = "hnsw"
     ef_search: int | None = None
+    rrf_k: int = RRF_K
 
     def similarity_search_with_score(self, question: str, k: int = 5) -> list[tuple[Document, float]]:
         query = self.embeddings.embed_queries([question])
@@ -314,16 +326,16 @@ class VectorStore:
                 if 0 <= idx < len(self.docs)
             ]
         depth = dense_depth(self.index_type, self.ef_search, len(self.docs), min_k=k)
-        dense = dense_rankings(self.index, query, depth)[0]
-        sparse = bm25_rankings(self.bm25, [question], len(self.docs))[0]
-        scores = rrf_scores([dense, sparse])
-        return [(self.docs[idx], scores[idx]) for idx in rrf_fuse([dense, sparse])[:k]]
+        orders, score_maps = rank_indices(
+            self.index, query, [question], self.bm25, depth, self.rrf_k
+        )
+        return [(self.docs[idx], score_maps[0][idx]) for idx in orders[0][:k]]
 
 
 def load_vector_store(
     config: Config,
     collection: str | None = None,
-    embeddings: PrefixedEmbeddings | None = None,
+    embeddings: ChunkEmbeddings | None = None,
 ) -> VectorStore:
     """Загружает FAISS-коллекцию (и BM25 при hybrid-прогоне); ef_search берётся из конфига."""
     store_dir = config.faiss_dir
@@ -357,7 +369,7 @@ def load_vector_store(
                 bm25 = load_bm25(bm25_path)
 
     if embeddings is None:
-        embeddings = PrefixedEmbeddings(config.embedding)
+        embeddings = ChunkEmbeddings(config.embedding)
     return VectorStore(
         index=index,
         docs=docs,
@@ -365,6 +377,7 @@ def load_vector_store(
         bm25=bm25,
         index_type=index_type,
         ef_search=config.index.hnsw.ef_search if index_type == "hnsw" else None,
+        rrf_k=config.rag.rrf_k,
     )
 
 
@@ -374,7 +387,6 @@ def main() -> None:
     parser.add_argument("--set", dest="overrides", action="append", default=[], metavar="KEY=VALUE")
     parser.add_argument("--run-id", default=None, help="запуск п.3 (по умолчанию из latest.json)")
     parser.add_argument("--rebuild", action="store_true", help="пересобрать коллекцию")
-    parser.add_argument("--drop-and-reindex", action="store_true", help="удалить всё хранилище и построить заново")
     parser.add_argument("--reset", action="store_true", help="удалить коллекцию (с --all всё хранилище)")
     parser.add_argument("--all", action="store_true", help="вместе с --reset: удалить все коллекции")
     parser.add_argument("--list", action="store_true", help="показать коллекции")
@@ -387,8 +399,6 @@ def main() -> None:
         elif args.reset:
             reset(config, args.run_id, args.all)
         else:
-            if args.drop_and_reindex:
-                shutil.rmtree(config.faiss_dir, ignore_errors=True)
             build_collection(config, resolve_run_id(config, args.run_id), rebuild=args.rebuild)
     except (FileNotFoundError, ValueError, RuntimeError) as error:
         raise SystemExit(str(error)) from error

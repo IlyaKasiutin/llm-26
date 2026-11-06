@@ -1,4 +1,4 @@
-"""RAG-движок: поиск по FAISS, сборка промпта, вызов vLLM, цитаты."""
+"""RAG-движок: поиск по FAISS/BM25, сборка промпта, вызов vLLM, цитаты."""
 
 from __future__ import annotations
 
@@ -10,7 +10,7 @@ from typing import Any
 from config import Config
 
 from .llm import LlmUnavailable, make_llm, resolve_model
-from .prompts import NO_ANSWER, build_messages
+from .prompts import NO_ANSWER, build_messages, strip_section_prefix
 
 _MARKER = re.compile(r"\[(\d+(?:\s*[,;]\s*\d+)*)\]")
 
@@ -26,8 +26,9 @@ def parse_markers(answer: str, max_n: int) -> list[int]:
     return found
 
 
-def _snippet(text: str, limit: int) -> str:
-    flat = " ".join(text.split())
+def _snippet(text: str, limit: int, section: str | None = None) -> str:
+    body = strip_section_prefix(text, section)
+    flat = " ".join(body.split())
     return flat if len(flat) <= limit else flat[: limit - 1].rstrip() + "…"
 
 
@@ -56,13 +57,15 @@ class RagEngine:
 
     def retrieve(self, question: str, top_n: int | None = None) -> list[dict]:
         rag = self.config.rag
-        hits = self.store.similarity_search_with_score(question, k=top_n or rag.top_n)
+        limit = top_n or rag.top_n
+        hits = self.store.similarity_search_with_score(question, k=limit)
+
         blocks: list[dict] = []
         used = 0
         for doc, score in hits:
+            if len(blocks) >= limit:
+                break
             score = float(score)
-            if rag.min_score is not None and score < rag.min_score:
-                continue
             tokens = self.count_tokens(doc.page_content)
             if blocks and used + tokens > rag.max_context_tokens:
                 break
@@ -101,7 +104,7 @@ class RagEngine:
                 "page": block["page"],
                 "section": block["section"],
                 "score": block["score"],
-                "snippet": _snippet(block["text"], limit),
+                "snippet": _snippet(block["text"], limit, block.get("section")),
                 "cited": bool(cited),
             }
             for block in blocks

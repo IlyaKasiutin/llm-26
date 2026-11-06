@@ -24,11 +24,9 @@ class SourcesConfig(_Section):
 
 
 class SplitterConfig(_Section):
-    type: Literal["markdown_header", "recursive"] = "markdown_header"
     chunk_size: int = Field(default=512, gt=0)
     chunk_overlap: int = Field(default=50, ge=0)
     header_levels: int = Field(default=3, ge=1, le=6)
-    include_headings: Literal["none", "metadata", "text", "both"] = "both"
 
     @model_validator(mode="after")
     def _check_overlap(self) -> SplitterConfig:
@@ -43,7 +41,7 @@ class SparseConfig(_Section):
 
 
 class EmbeddingConfig(_Section):
-    vectorization: Literal["dense", "sparse", "hybrid"] = "dense"
+    vectorization: Literal["dense", "hybrid"] = "dense"
     model: str = "ai-forever/FRIDA"
     device: Literal["auto", "cpu", "mps", "cuda"] = "auto"
     batch_size: int = Field(default=16, gt=0)
@@ -62,13 +60,12 @@ class HnswConfig(_Section):
     @model_validator(mode="after")
     def _check_efc(self) -> HnswConfig:
         if self.ef_construction < self.M:
-            raise ValueError("Нужно hnsw.M >= 4, ef_construction >= M, ef_search >= 1")
+            raise ValueError("Нужно ef_construction >= M")
         return self
 
 
 class IndexConfig(_Section):
     type: Literal["hnsw", "flat"] = "hnsw"
-    metric: Literal["cosine"] = "cosine"
     hnsw: HnswConfig = Field(default_factory=HnswConfig)
     quantization: Literal["none", "fp16", "sq8"] = "none"
     dir: str = "faiss"
@@ -83,7 +80,7 @@ class IndexConfig(_Section):
 class RagConfig(_Section):
     collection: str | None = None
     top_n: int = Field(default=5, ge=1)
-    min_score: float | None = None
+    rrf_k: int = Field(default=60, ge=1)
     max_context_tokens: int = Field(default=3000, ge=1)
     snippet_chars: int = Field(default=240, ge=1)
 
@@ -164,10 +161,13 @@ def load_config(path: str | Path | None = None, overrides: list[str] | None = No
 
 def sources_fingerprint(directory: Path) -> list[list[Any]]:
     items = []
-    for item in sorted(directory.rglob("*")):
-        if item.is_file():
-            stat = item.stat()
-            items.append([item.relative_to(directory).as_posix(), stat.st_size, stat.st_mtime_ns])
+    parsed_dir = LAB2_ROOT / "src" / "preprocessing" / "output"
+    roots = [directory] + ([parsed_dir] if parsed_dir.is_dir() else [])
+    for root in roots:
+        for item in sorted(root.rglob("*")):
+            if item.is_file() and item.suffix != ".jsonl":
+                stat = item.stat()
+                items.append([item.relative_to(root).as_posix(), stat.st_size, stat.st_mtime_ns])
     return items
 
 

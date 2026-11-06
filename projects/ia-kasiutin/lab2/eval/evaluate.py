@@ -30,16 +30,11 @@ import numpy as np
 
 from config import Config, load_config
 from index.load_to_vector_store import (
-    ACTIVE_FILE,
     INDEX_FILE,
-    RRF_K,
-    bm25_rankings,
     build_collection,
     dense_depth,
-    dense_rankings,
-    fuse_rankings,
     load_bm25,
-    rrf_fuse,
+    rank_indices,
     set_ef_search,
 )
 from report import METRIC_KEYS, index_title, render_report
@@ -49,8 +44,17 @@ COVERAGE = 0.6
 EF_SEARCH = (16, 64, 128)
 RUN_IDS = (
     "dense-frida-markdown_header-cs400-ov50-dcc2c0ee",
-    "hybrid-frida-hybrid-cs400-ov50-992cdc63",
+    "dense-frida-recursive-cs400-ov50-85f6432f",
 )
+
+
+def discover_run_ids(artifacts_dir: Path) -> tuple[str, ...]:
+    found = sorted(
+        p.name
+        for p in artifacts_dir.iterdir()
+        if p.is_dir() and (p / "manifest.json").is_file() and (p / "chunks.jsonl").is_file()
+    )
+    return tuple(found) if found else RUN_IDS
 # M=32 и ef_construction=200 у flat не используются, но проходят валидацию конфига.
 BUILDS: tuple[dict[str, Any], ...] = (
     {"type": "flat", "M": 32, "ef_construction": 200, "quantization": "none"},
@@ -200,35 +204,22 @@ def round_metrics(metrics: dict[str, float]) -> dict[str, float]:
     return {key: round(metrics[key], 6) for key in METRIC_KEYS}
 
 
-def snapshot_active(store_dir: Path) -> str | None:
-    path = store_dir / ACTIVE_FILE
-    return path.read_text(encoding="utf-8") if path.is_file() else None
-
-
-def restore_active(store_dir: Path, previous: str | None) -> None:
-    path = store_dir / ACTIVE_FILE
-    if previous is None:
-        path.unlink(missing_ok=True)
-    else:
-        path.write_text(previous, encoding="utf-8")
-
-
-def build_indexes(config_path: str | None) -> list[dict[str, Any]]:
+def build_indexes(config_path: str | None, run_ids: tuple[str, ...]) -> list[dict[str, Any]]:
     specs = []
-    for run_id in RUN_IDS:
+    for run_id in run_ids:
         for build in BUILDS:
             config = load_config(config_path, index_overrides(build, EF_SEARCH[1]))
-            path = build_collection(config, run_id)
+            path = build_collection(config, run_id, activate=False)
             specs.append({"run_id": run_id, "build": build, "path": path, "config": config})
     return specs
 
 
 def embed_questions(config: Config, questions: list[dict[str, Any]]) -> tuple[np.ndarray, float]:
-    from index.embedders import PrefixedEmbeddings
+    from index.embedders import ChunkEmbeddings
 
     print(f"Считаю эмбеддинги {len(questions)} вопросов, модель {config.embedding.model}")
     started = time.perf_counter()
-    embedder = PrefixedEmbeddings(config.embedding)
+    embedder = ChunkEmbeddings(config.embedding)
     vectors = embedder.embed_queries([question["question"] for question in questions])
     elapsed = time.perf_counter() - started
     print(f"Запросы: {vectors.shape}, device={embedder.device}, {elapsed:.1f} с")
@@ -247,36 +238,34 @@ def evaluate_specs(
     questions: list[dict[str, Any]],
     queries: np.ndarray,
     specs: list[dict[str, Any]],
+    run_ids: tuple[str, ...] = RUN_IDS,
 ) -> list[dict[str, Any]]:
     prepared: dict[str, dict[str, Any]] = {}
-    for run_id in RUN_IDS:
+    for run_id in run_ids:
         manifest = run_manifest(config, run_id)
         vectorization = manifest["config"]["embedding"]["vectorization"]
-        splitter = manifest["config"]["splitter"]["type"]
+        splitter = manifest["config"]["splitter"].get("type", "markdown_header")
         retrieval = "hybrid" if vectorization == "hybrid" else "dense"
         if vectorization not in {"dense", "hybrid"}:
             raise ValueError(f"{run_id}: vectorization={vectorization}, для FAISS нужен dense или hybrid")
         chunks = load_chunk_texts(config.artifacts_dir / run_id / "chunks.jsonl")
-        sparse = None
+        bm25 = None
         if retrieval == "hybrid":
             bm25_path = config.artifacts_dir / run_id / "bm25.pkl"
             if not bm25_path.is_file():
                 raise FileNotFoundError(f"Нет {bm25_path}")
-            sparse = bm25_rankings(
-                load_bm25(bm25_path),
-                [question["question"] for question in questions],
-                len(chunks),
-            )
+            bm25 = load_bm25(bm25_path)
         prepared[run_id] = {
             "splitter": splitter,
             "retrieval": retrieval,
             "chunks": chunks,
             "hits": [evidence_hits(chunks, question["evidence"]) for question in questions],
-            "sparse": sparse,
+            "bm25": bm25,
         }
 
     rows: list[dict[str, Any]] = []
-    for run_id in RUN_IDS:
+    question_texts = [question["question"] for question in questions]
+    for run_id in run_ids:
         info = prepared[run_id]
         run_specs = [spec for spec in specs if spec["run_id"] == run_id]
         run_specs.sort(key=lambda spec: spec["build"]["type"] != "flat")
@@ -290,10 +279,13 @@ def evaluate_specs(
                     spec["config"].index.hnsw.ef_search = ef_search
                     set_ef_search(index, spec["config"])
                 depth = dense_depth(build["type"], ef_search, len(info["chunks"]), min_k=KS[-1])
-                dense_rankings(index, queries, depth)  # прогрев: первый вызов FAISS заметно медленнее
+                rank_indices(
+                    index, queries, question_texts, info["bm25"], depth, config.rag.rrf_k
+                )  # прогрев: первый вызов FAISS заметно медленнее
                 started = time.perf_counter()
-                dense = dense_rankings(index, queries, depth)
-                rankings = fuse_rankings(info["retrieval"], dense, info["sparse"])
+                rankings, _scores = rank_indices(
+                    index, queries, question_texts, info["bm25"], depth, config.rag.rrf_k
+                )
                 search_ms = (time.perf_counter() - started) * 1000 / len(questions)
                 if build["type"] == "flat":
                     flat_rankings = rankings
@@ -329,27 +321,23 @@ def evaluate_specs(
 
 def evaluate(config_path: str | None = None, questions_path: str | None = None) -> None:
     config = load_config(config_path)
+    run_ids = discover_run_ids(config.artifacts_dir)
     questions_file = Path(questions_path) if questions_path else config.root / "eval" / "questions.json"
     questions, source = load_questions(questions_file)
     diploma = (config.root / source).read_text(encoding="utf-8")
     chunk_sets = {
         run_id: load_chunk_texts(config.artifacts_dir / run_id / "chunks.jsonl")
-        for run_id in RUN_IDS
+        for run_id in run_ids
     }
     errors = gold_errors(questions, diploma, chunk_sets)
     if errors:
         raise ValueError("Эталон не покрыт чанками:\n" + "\n".join(errors))
-    print(f"Эталон: {len(questions)} вопросов, цитаты покрыты обоими прогонами")
+    print(f"Эталон: {len(questions)} вопросов, цитаты покрыты прогонами: {run_ids}")
 
-    previous = snapshot_active(config.faiss_dir)
-    try:
-        specs = build_indexes(config_path)
-    finally:
-        restore_active(config.faiss_dir, previous)
-        print("active.json восстановлен")
+    specs = build_indexes(config_path, run_ids)
 
     queries, embed_seconds = embed_questions(config, questions)
-    rows = evaluate_specs(config, questions, queries, specs)
+    rows = evaluate_specs(config, questions, queries, specs, run_ids)
     out_dir = config.root / "eval"
     out_dir.mkdir(parents=True, exist_ok=True)
     payload = {
@@ -357,7 +345,7 @@ def evaluate(config_path: str | None = None, questions_path: str | None = None) 
         "n_questions": len(questions),
         "k": list(KS),
         "coverage_threshold": COVERAGE,
-        "rrf_k": RRF_K,
+        "rrf_k": config.rag.rrf_k,
         "query_embed_seconds": round(embed_seconds, 3),
         "rows": rows,
     }
@@ -365,7 +353,7 @@ def evaluate(config_path: str | None = None, questions_path: str | None = None) 
     report_path = out_dir / "report.md"
     metrics_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     report_path.write_text(
-        render_report(rows, questions, embed_seconds, COVERAGE, RRF_K, RUN_IDS),
+        render_report(rows, questions, embed_seconds, COVERAGE, config.rag.rrf_k),
         encoding="utf-8",
     )
     print(f"Метрики: {metrics_path}")

@@ -1,9 +1,3 @@
-"""Построение чанков и эмбеддингов (п.3).
-
-Запуск из lab2/src:
-    python -m index.build_index --config ../config.yaml --set splitter.chunk_size=300
-"""
-
 from __future__ import annotations
 
 import argparse
@@ -21,7 +15,7 @@ import numpy as np
 from preprocessing.loaders import load_documents
 
 from config import Config, config_hash, load_config
-from .embedders import EmbeddingCache, PrefixedEmbeddings, build_bm25
+from .embedders import EmbeddingCache, ChunkEmbeddings, build_bm25
 from .splitters import embedder_token_counter, split_documents
 
 MANIFEST = "manifest.json"
@@ -31,7 +25,7 @@ def make_run_id(config: Config, digest: str) -> str:
     slug = re.sub(r"[^\w.-]+", "-", config.embedding.model.split("/")[-1]).lower()
     s = config.splitter
     return (
-        f"{config.embedding.vectorization}-{slug}-{s.type}-cs{s.chunk_size}"
+        f"{config.embedding.vectorization}-{slug}-cs{s.chunk_size}"
         f"-ov{s.chunk_overlap}-{digest[:8]}"
     )
 
@@ -84,8 +78,8 @@ def build(config: Config, rebuild: bool = False, dry_run: bool = False) -> Path 
 
     started = time.time()
     documents = load_documents(config.sources_dir, reparse=config.sources.reparse)
-    print(f"Documents: {len(documents)}")
     chunks = split_documents(documents, config)
+
     if not chunks:
         raise ValueError("Не получено ни одного чанка")
 
@@ -95,6 +89,7 @@ def build(config: Config, rebuild: bool = False, dry_run: bool = False) -> Path 
     count_embed = embedder_token_counter(config)
     embedded_tokens = [c.metadata.get("embed_tokens") or count_embed(c.page_content) for c in chunks]
     truncated = sum(t > emb.max_seq_length for t in embedded_tokens)
+    
     print(f"Чанков: {len(chunks)}; токены: {stats}; будут обрезаны моделью: {truncated}")
     if dry_run:
         return None
@@ -105,16 +100,13 @@ def build(config: Config, rebuild: bool = False, dry_run: bool = False) -> Path 
     texts = [c.page_content for c in chunks]
     write_chunks(tmp_dir / "chunks.jsonl", chunks)
 
-    computed = 0
-    dim = None
-    if emb.vectorization in {"dense", "hybrid"}:
-        embedder = PrefixedEmbeddings(emb)
-        cache = EmbeddingCache(artifacts / "_embedding_cache", emb)
-        vectors, computed = cache.embed(texts, embedder)
-        np.save(tmp_dir / "embeddings.npy", vectors)
-        dim = int(vectors.shape[1])
-        print(f"Эмбеддинги: {vectors.shape}, посчитано заново: {computed}, device={embedder.device}")
-    if emb.vectorization in {"sparse", "hybrid"}:
+    embedder = ChunkEmbeddings(emb)
+    cache = EmbeddingCache(artifacts / "_embedding_cache", emb)
+    vectors, computed = cache.embed(texts, embedder)
+    np.save(tmp_dir / "embeddings.npy", vectors)
+    dim = int(vectors.shape[1])
+    print(f"Эмбеддинги: {vectors.shape}, посчитано заново: {computed}, device={embedder.device}")
+    if emb.vectorization == "hybrid":
         bm25 = build_bm25(texts, config)
         with (tmp_dir / "bm25.pkl").open("wb") as handle:
             pickle.dump(

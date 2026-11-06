@@ -3,14 +3,12 @@ sources:
   reparse: false
 
 splitter:
-  type: markdown_header      # markdown_header | recursive
-  chunk_size: 400
+  chunk_size: 512
   chunk_overlap: 50
   header_levels: 3
-  include_headings: both     # none | metadata | text | both
 
 embedding:
-  vectorization: dense       # dense | sparse | hybrid
+  vectorization: dense       # dense | hybrid
   model: ai-forever/FRIDA
   device: auto
   batch_size: 16
@@ -24,7 +22,6 @@ embedding:
 
 index:
   type: hnsw
-  metric: cosine
   hnsw:
     M: 32
     ef_construction: 200
@@ -35,7 +32,7 @@ index:
 rag:
   collection: null           # null = активная из artifacts/faiss/active.json
   top_n: 5
-  min_score: null
+  rrf_k: 60                  # знаменатель RRF: 1 / (rrf_k + rank)
   max_context_tokens: 3000
   snippet_chars: 240
 

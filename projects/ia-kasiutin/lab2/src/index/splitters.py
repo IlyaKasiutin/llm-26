@@ -1,5 +1,3 @@
-"""Разбиение Documents на чанки; длина считается в токенах токенайзера эмбеддера."""
-
 from __future__ import annotations
 
 import hashlib
@@ -21,7 +19,6 @@ def load_tokenizer(model: str):
     from transformers import AutoTokenizer
 
     tokenizer = AutoTokenizer.from_pretrained(model)
-    tokenizer.model_max_length = 1_000_000  # отключает ложный warning до нарезки длинных секций
     return tokenizer
 
 
@@ -41,7 +38,7 @@ def embedder_token_counter(config: Config) -> Callable[[str], int]:
     return lambda text: count_with_special(prefix + text)
 
 
-def _recursive(
+def _body_splitter(
     chunk_size: int, chunk_overlap: int, length: Callable[[str], int]
 ) -> RecursiveCharacterTextSplitter:
     return RecursiveCharacterTextSplitter(
@@ -52,38 +49,38 @@ def _recursive(
     )
 
 
+def _update_headers(active_headers: dict[str, str], new_headers: dict[str, str]) -> None:
+    if not new_headers:
+        return
+    top_idx = min(HEADER_KEYS.index(k) for k in new_headers)
+    for k in HEADER_KEYS[top_idx:]:
+        active_headers.pop(k, None)
+    active_headers.update(new_headers)
+
+
 def _header_sections(
-    page: Document, levels: int, strip_headers: bool, active_headers: dict[str, str]
+    page: Document, levels: int, active_headers: dict[str, str]
 ) -> list[Document]:
     splitter = MarkdownHeaderTextSplitter(
         headers_to_split_on=[("#" * (i + 1), HEADER_KEYS[i]) for i in range(levels)],
-        strip_headers=strip_headers,
+        strip_headers=True,
     )
     sections: list[Document] = []
     for sec in splitter.split_text(page.page_content):
         if not sec.page_content.strip():
             continue
-        sec_headers = {k: sec.metadata[k] for k in HEADER_KEYS if k in sec.metadata}
-        if sec_headers:
-            top_idx = min(HEADER_KEYS.index(k) for k in sec_headers)
-            for k in HEADER_KEYS[top_idx:]:
-                active_headers.pop(k, None)
-            active_headers.update(sec_headers)
+        _update_headers(
+            active_headers, {k: sec.metadata[k] for k in HEADER_KEYS if k in sec.metadata}
+        )
         sections.append(
-            Document(
-                page_content=sec.page_content,
-                metadata={**page.metadata, **active_headers},
-            )
+            Document(page_content=sec.page_content.strip(), metadata={**page.metadata, **active_headers})
         )
 
     if not sections and page.page_content.strip():
         for line in page.page_content.splitlines():
             match = re.match(r"^(#{1,6})\s+(.*)", line.strip())
             if match and len(match.group(1)) <= levels and match.group(2).strip():
-                idx = len(match.group(1)) - 1
-                for k in HEADER_KEYS[idx:]:
-                    active_headers.pop(k, None)
-                active_headers[HEADER_KEYS[idx]] = match.group(2).strip()
+                _update_headers(active_headers, {HEADER_KEYS[len(match.group(1)) - 1]: match.group(2).strip()})
         cleaned = re.sub(r"(?m)^#{1,6}\s+", "", page.page_content).strip()
         if cleaned:
             return [Document(page_content=cleaned, metadata={**page.metadata, **active_headers})]
@@ -113,7 +110,7 @@ def _split_body(
     prefix_tokens = length(heading_prefix) if heading_prefix else 0
     budget = max(1, max_chunk_tokens - prefix_tokens)
     overlap = min(chunk_overlap, budget - 1)
-    raw_pieces = [p.strip() for p in _recursive(budget, overlap, length).split_text(sec_body) if p.strip()]
+    raw_pieces = [p.strip() for p in _body_splitter(budget, overlap, length).split_text(sec_body) if p.strip()]
 
     pieces: list[str] = []
     for piece in raw_pieces:
@@ -123,7 +120,7 @@ def _split_body(
             sub_budget = max(1, budget - over)
             sub_overlap = min(chunk_overlap, sub_budget - 1)
             pieces.extend(
-                p.strip() for p in _recursive(sub_budget, sub_overlap, length).split_text(piece) if p.strip()
+                p.strip() for p in _body_splitter(sub_budget, sub_overlap, length).split_text(piece) if p.strip()
             )
         else:
             pieces.append(piece)
@@ -133,13 +130,11 @@ def _split_body(
 def split_documents(
     documents: list[Document],
     config: Config,
-    length_fn: Callable[[str], int] | None = None,
-    embed_length_fn: Callable[[str], int] | None = None,
 ) -> list[Document]:
     s = config.splitter
     emb = config.embedding
-    length = length_fn or token_counter(emb.model, add_special_tokens=False)
-    count_embed = embed_length_fn or embedder_token_counter(config)
+    length = token_counter(emb.model, add_special_tokens=False)
+    count_embed = embedder_token_counter(config)
 
     embed_overhead = count_embed("")
     max_chunk_tokens = min(s.chunk_size, emb.max_seq_length - embed_overhead)
@@ -148,8 +143,7 @@ def split_documents(
             f"Недостаточно места в max_seq_length={emb.max_seq_length} после вычета префикса ({embed_overhead})"
         )
 
-    prepend_headings = s.include_headings in {"text", "both"}
-    chunks: list[Document] = []
+    sections: list[Document] = []
     active_headers: dict[str, str] = {}
     current_source: str | None = None
 
@@ -158,42 +152,38 @@ def split_documents(
         if source != current_source:
             active_headers.clear()
             current_source = source
+        sections.extend(_header_sections(page, s.header_levels, active_headers))
 
-        if s.type == "recursive":
-            sections = [Document(page_content=page.page_content, metadata=dict(page.metadata))]
-        else:
-            sections = _header_sections(
-                page, s.header_levels, strip_headers=prepend_headings, active_headers=active_headers
-            )
+    chunks: list[Document] = []
+    for sec in sections:
+        sec_body = sec.page_content.strip()
+        if not sec_body:
+            continue
 
-        for sec in sections:
-            sec_body = sec.page_content.strip()
-            if not sec_body:
-                continue
-            base_meta = dict(sec.metadata)
-            path = _heading_path(base_meta)
-            heading_prefix = f"{' > '.join(path)}\n\n" if (prepend_headings and path) else ""
+        base_meta = dict(sec.metadata)
+        path = _heading_path(base_meta)
+        heading_prefix = ""
+        if path:
+            base_meta["section"] = " > ".join(path)
+            heading_prefix = f"{base_meta['section']}\n\n"
 
-            pieces = _split_body(
-                sec_body=sec_body,
-                heading_prefix=heading_prefix,
-                max_chunk_tokens=max_chunk_tokens,
-                max_seq_length=emb.max_seq_length,
-                chunk_overlap=s.chunk_overlap,
-                length=length,
-                count_embed=count_embed,
-            )
+        pieces = _split_body(
+            sec_body=sec_body,
+            heading_prefix=heading_prefix,
+            max_chunk_tokens=max_chunk_tokens,
+            max_seq_length=emb.max_seq_length,
+            chunk_overlap=s.chunk_overlap,
+            length=length,
+            count_embed=count_embed,
+        )
 
-            for piece_body in pieces:
-                text = f"{heading_prefix}{piece_body}"
-                metadata = dict(base_meta)
-                if s.include_headings in {"none", "text"}:
-                    for key in HEADER_KEYS:
-                        metadata.pop(key, None)
-                metadata["chunk_index"] = len(chunks)
-                metadata["n_tokens"] = length(text)
-                metadata["embed_tokens"] = count_embed(text)
-                key = f"{metadata.get('source')}|{metadata.get('page')}|{len(chunks)}|{text}"
-                metadata["chunk_id"] = hashlib.sha1(key.encode("utf-8")).hexdigest()[:16]
-                chunks.append(Document(page_content=text, metadata=metadata))
+        for piece_body in pieces:
+            text = f"{heading_prefix}{piece_body}"
+            metadata = dict(base_meta)
+            metadata["chunk_index"] = len(chunks)
+            metadata["n_tokens"] = length(text)
+            metadata["embed_tokens"] = count_embed(text)
+            key = f"{metadata.get('source')}|{metadata.get('page')}|{len(chunks)}|{text}"
+            metadata["chunk_id"] = hashlib.sha1(key.encode("utf-8")).hexdigest()[:16]
+            chunks.append(Document(page_content=text, metadata=metadata))
     return chunks

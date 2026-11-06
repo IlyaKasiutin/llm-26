@@ -26,7 +26,7 @@ def resolve_device(requested: str) -> str:
     return "cpu"
 
 
-class PrefixedEmbeddings(Embeddings):
+class ChunkEmbeddings(Embeddings):
     """Sentence-transformers с префиксами search_document / search_query (по карточке FRIDA).
 
     Префикс подаётся только на вход энкодера и не попадает в сохранённый текст чанка.
@@ -80,7 +80,7 @@ class EmbeddingCache:
     def key(self, text: str) -> str:
         return hashlib.sha256(f"{self.salt}|{text}".encode("utf-8")).hexdigest()
 
-    def embed(self, texts: list[str], embedder: PrefixedEmbeddings) -> tuple[np.ndarray, int]:
+    def embed(self, texts: list[str], embedder: ChunkEmbeddings) -> tuple[np.ndarray, int]:
         """Возвращает (матрица векторов в порядке texts, число реально посчитанных)."""
         keys = [self.key(t) for t in texts]
         missing: dict[str, str] = {}
@@ -110,7 +110,7 @@ _WORD = re.compile(r"\w+", re.UNICODE)
 
 
 def bm25_tokenize(text: str) -> list[str]:
-    return _WORD.findall(text.lower())
+    return _WORD.findall(text.lower().replace("ё", "е"))
 
 
 def build_bm25(texts: list[str], config: Config):

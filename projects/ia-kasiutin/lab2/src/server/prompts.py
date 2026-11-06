@@ -12,13 +12,20 @@ SYSTEM_PROMPT = (
 NO_ANSWER = "В документах нет ответа на этот вопрос."
 
 
+def strip_section_prefix(text: str, section: str | None) -> str:
+    if section and text.startswith(f"{section}\n\n"):
+        return text[len(section) + 2 :]
+    return text
+
+
 def format_context(blocks: list[dict]) -> str:
     parts = []
     for block in blocks:
+        section = block.get("section")
         header = f"[{block['n']}] {block['source']}, стр. {block['page']}"
-        if block.get("section"):
-            header += f", раздел: {block['section']}"
-        parts.append(f"{header}\n{block['text']}")
+        if section:
+            header += f", раздел: {section}"
+        parts.append(f"{header}\n{strip_section_prefix(block['text'], section)}")
     return "\n\n".join(parts)
 
 

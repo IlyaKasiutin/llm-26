@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import argparse
-import json
+import re
 from collections.abc import Iterator
 from datetime import datetime, timezone
 from pathlib import Path
@@ -13,7 +13,7 @@ from . import parse_pdf
 
 OUTPUT_DIR = parse_pdf.OUTPUT_PATH.parent
 SOURCES_DIR = parse_pdf.LAB2_ROOT / "docs"
-CACHE_VERSION = 1
+_PAGE_SPLIT = re.compile(r"<!--\s*source:\s*\S+\s+page:\s*(\d+)[^>]*-->")
 
 
 def _relative_path(path: Path) -> str:
@@ -27,17 +27,19 @@ def _modified_date(path: Path) -> str:
     return datetime.fromtimestamp(path.stat().st_mtime, tz=timezone.utc).date().isoformat()
 
 
-def _fingerprint(path: Path) -> dict:
-    stat = path.stat()
-    return {"version": CACHE_VERSION, "mtime_ns": stat.st_mtime_ns, "size": stat.st_size}
+def _parse_markdown_pages(markdown: str, base_meta: dict) -> list[Document]:
+    parts = _PAGE_SPLIT.split(markdown)
+    docs: list[Document] = []
+    for idx in range(1, len(parts), 2):
+        page = int(parts[idx])
+        body = parts[idx + 1].strip()
+        if body:
+            docs.append(Document(page_content=body, metadata={**base_meta, "page": page}))
+    return docs
 
 
 class DoclingPageLoader(BaseLoader):
-    """PDF -> по одному Document на страницу (markdown + метаданные).
-
-    Результат кэшируется в `cache_dir/<stem>.docs.jsonl`, а читаемый markdown
-    пишется в `cache_dir/<stem>.md`. Кэш инвалидируется по mtime/size PDF.
-    """
+    """PDF -> по одному Document на страницу из кэшированного `cache_dir/<stem>.md`."""
 
     def __init__(
         self,
@@ -50,32 +52,16 @@ class DoclingPageLoader(BaseLoader):
         self.reparse = reparse
 
     @property
-    def _cache_path(self) -> Path:
-        return self.cache_dir / f"{self.file_path.stem}.docs.jsonl"
-
-    @property
     def _markdown_path(self) -> Path:
         return self.cache_dir / f"{self.file_path.stem}.md"
 
     def lazy_load(self) -> Iterator[Document]:
-        if not self.reparse:
-            cached = self._read_cache()
-            if cached is not None:
-                yield from cached
-                return
-        yield from self._parse_and_cache()
-
-    def _read_cache(self) -> list[Document] | None:
-        if not self._cache_path.is_file():
-            return None
-        with self._cache_path.open(encoding="utf-8") as handle:
-            lines = handle.read().splitlines()
-        if not lines or json.loads(lines[0]) != _fingerprint(self.file_path):
-            return None
-        return [Document(**json.loads(line)) for line in lines[1:]]
-
-    def _parse_and_cache(self) -> list[Document]:
-        document = parse_pdf.convert(self.file_path)
+        if self.reparse or not self._markdown_path.is_file():
+            document = parse_pdf.convert(self.file_path)
+            self.cache_dir.mkdir(parents=True, exist_ok=True)
+            self._markdown_path.write_text(
+                parse_pdf.render(document, self.file_path), encoding="utf-8"
+            )
         base = {
             "source": self.file_path.name,
             "path": _relative_path(self.file_path),
@@ -83,22 +69,9 @@ class DoclingPageLoader(BaseLoader):
             "format": "pdf",
             "parser": "docling",
         }
-        docs = [
-            Document(page_content=body, metadata={**base, "page": page, "section": section})
-            for page, section, body in parse_pdf.iter_pages(document)
-            if body
-        ]
-
-        self.cache_dir.mkdir(parents=True, exist_ok=True)
-        self._markdown_path.write_text(
-            parse_pdf.render(document, self.file_path), encoding="utf-8"
+        yield from _parse_markdown_pages(
+            self._markdown_path.read_text(encoding="utf-8"), base
         )
-        with self._cache_path.open("w", encoding="utf-8") as handle:
-            handle.write(json.dumps(_fingerprint(self.file_path)) + "\n")
-            for doc in docs:
-                record = {"page_content": doc.page_content, "metadata": doc.metadata}
-                handle.write(json.dumps(record, ensure_ascii=False) + "\n")
-        return docs
 
 
 class MarkdownFileLoader(BaseLoader):
@@ -156,7 +129,7 @@ def loader_for(path: Path, reparse: bool = False) -> BaseLoader:
 def load_documents(
     sources_dir: str | Path = SOURCES_DIR, reparse: bool = False
 ) -> list[Document]:
-    supported = {".pdf", ".md", ".markdown", ".docx", ".pptx", ".html", ".htm"}
+    supported = {".pdf", ".md", ".markdown"}
     documents: list[Document] = []
     for path in sorted(Path(sources_dir).rglob("*")):
         if path.is_file() and path.suffix.lower() in supported:
