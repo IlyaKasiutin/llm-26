@@ -1,5 +1,3 @@
-"""Dense (FRIDA) и sparse (BM25) векторизация."""
-
 from __future__ import annotations
 
 import hashlib

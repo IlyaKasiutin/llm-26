@@ -1,11 +1,3 @@
-"""Загрузка эмбеддингов из п.3 в FAISS (п.4) и единый поиск (dense / hybrid RRF).
-
-Запуск из lab2/src:
-    python -m index.load_to_vector_store                       # latest run из artifacts/latest.json
-    python -m index.load_to_vector_store --run-id <run_id> --set index.hnsw.M=16
-    python -m index.load_to_vector_store --rebuild | --reset [--all] | --list
-"""
-
 from __future__ import annotations
 
 import argparse
@@ -219,7 +211,7 @@ def list_collections(config: Config) -> None:
         )
 
 
-# ---------- единый поиск (dense + hybrid BM25/RRF) для п.5 и п.6 ----------
+# ---------- единый поиск (dense + hybrid BM25/RRF) ----------
 
 def load_bm25(path: Path) -> Any:
     with path.open("rb") as handle:

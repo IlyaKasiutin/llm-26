@@ -346,5 +346,37 @@ class ReportAndConfigTests(unittest.TestCase):
         self.assertIn(orders[0][0], score_maps[0])
 
 
+class PromptWindowTests(unittest.TestCase):
+    def test_prompt_fits_when_sum_equals_window(self) -> None:
+        from server.llm import ensure_prompt_fits
+
+        ensure_prompt_fits("Qwen/Qwen3-4B", 100, 700, 800)
+
+    def test_prompt_one_token_over_raises(self) -> None:
+        from server.llm import PromptTooLong, ensure_prompt_fits
+
+        with self.assertRaises(PromptTooLong) as caught:
+            ensure_prompt_fits("Qwen/Qwen3-4B", 101, 700, 800)
+        message = str(caught.exception)
+        self.assertIn("Qwen/Qwen3-4B", message)
+        self.assertIn("101", message)
+        self.assertIn("700", message)
+        self.assertIn("800", message)
+
+    def test_context_length_reads_max_model_len(self) -> None:
+        from server.llm import context_length
+
+        payload = {"data": [{"id": "Qwen/Qwen3-4B", "max_model_len": 8192}]}
+        self.assertEqual(context_length(payload, "Qwen/Qwen3-4B"), 8192)
+
+    def test_missing_max_model_len_cannot_confirm_window(self) -> None:
+        from server.llm import LlmUnavailable, context_length
+
+        payload = {"data": [{"id": "Qwen/Qwen3-4B"}]}
+        with self.assertRaises(LlmUnavailable) as caught:
+            context_length(payload, "Qwen/Qwen3-4B")
+        self.assertIn("max_model_len", str(caught.exception))
+
+
 if __name__ == "__main__":
     unittest.main()

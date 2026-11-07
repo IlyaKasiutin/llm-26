@@ -9,7 +9,16 @@ from typing import Any
 
 from config import Config
 
-from .llm import LlmUnavailable, make_llm, resolve_model
+from .llm import (
+    LlmUnavailable,
+    context_length,
+    count_prompt_tokens,
+    ensure_prompt_fits,
+    fetch_models_payload,
+    load_chat_tokenizer,
+    make_llm,
+    resolve_model,
+)
 from .prompts import NO_ANSWER, build_messages, strip_section_prefix
 
 _MARKER = re.compile(r"\[(\d+(?:\s*[,;]\s*\d+)*)\]")
@@ -53,6 +62,8 @@ class RagEngine:
         self.config = config
         self.llm = llm
         self.model_id = model_id
+        self.max_model_len: int | None = None
+        self.chat_tokenizer = None
         self.count_tokens = count_tokens or (lambda text: len(text.split()))
 
     def retrieve(self, question: str, top_n: int | None = None) -> list[dict]:
@@ -89,7 +100,10 @@ class RagEngine:
 
     def _ensure_llm(self):
         if self.llm is None:
-            self.model_id = self.model_id or resolve_model(self.config.llm)
+            payload = fetch_models_payload(self.config.llm)
+            self.model_id = self.model_id or resolve_model(self.config.llm, payload)
+            self.max_model_len = context_length(payload, self.model_id)
+            self.chat_tokenizer = load_chat_tokenizer(self.model_id)
             self.llm = make_llm(self.config.llm, self.model_id)
         return self.llm
 
@@ -126,6 +140,17 @@ class RagEngine:
             }
 
         llm = self._ensure_llm()
+        if self.chat_tokenizer is None or self.max_model_len is None or not self.model_id:
+            raise LlmUnavailable(
+                f"Окно модели {self.model_id} не подтверждено, запрос не отправлен"
+            )
+        prompt_tokens = count_prompt_tokens(self.chat_tokenizer, messages, self.model_id)
+        ensure_prompt_fits(
+            self.model_id,
+            prompt_tokens,
+            self.config.llm.max_tokens,
+            self.max_model_len,
+        )
         llm_started = time.perf_counter()
         try:
             message = llm.invoke(messages)

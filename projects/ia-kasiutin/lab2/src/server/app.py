@@ -9,7 +9,7 @@ from pydantic import BaseModel, Field
 from config import load_config
 
 from .engine import RagEngine, build_engine
-from .llm import LlmUnavailable, list_model_ids, resolve_base_url
+from .llm import LlmUnavailable, PromptTooLong, list_model_ids, resolve_base_url
 
 state: dict[str, RagEngine] = {}
 
@@ -35,6 +35,8 @@ def ask(request: AskRequest) -> dict:
     engine = state["engine"]
     try:
         return engine.ask(request.question, request.top_n)
+    except PromptTooLong as error:
+        raise HTTPException(status_code=400, detail=str(error)) from error
     except LlmUnavailable as error:
         raise HTTPException(status_code=503, detail=str(error)) from error
 

@@ -8,7 +8,7 @@ import json
 from config import load_config
 
 from .engine import build_engine
-from .llm import LlmUnavailable
+from .llm import LlmUnavailable, PromptTooLong
 
 
 def show_prompt(engine, question: str, top_n: int | None) -> None:
@@ -49,7 +49,7 @@ def main() -> None:
             return
         try:
             result = engine.ask(question, args.top_n)
-        except LlmUnavailable as error:
+        except (LlmUnavailable, PromptTooLong) as error:
             raise SystemExit(f"Ошибка: {error}")
         if args.json:
             print(json.dumps(result, ensure_ascii=False, indent=2))
